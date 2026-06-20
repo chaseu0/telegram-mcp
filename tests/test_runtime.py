@@ -416,12 +416,28 @@ async def test_resolve_entity_tries_marked_id_candidates_after_cache_miss(monkey
     async def noop(_client):
         return None
 
-    client = _ResolvingClient("entity", [ValueError("not a user"), ValueError("still cold")])
+    client = _ResolvingClient(
+        "entity",
+        [ValueError("not a user"), ValueError("still cold"), ValueError("peer user fail")],
+    )
     monkeypatch.setattr(runtime, "ensure_connected", noop)
 
     assert await runtime.resolve_entity(123, client) == "entity:-1000000000123"
     assert client.dialogs_loaded == 1
-    assert client.calls == [123, 123, -1000000000123]
+    assert client.calls == [123, 123, PeerUser(123), -1000000000123]
+
+
+@pytest.mark.asyncio
+async def test_resolve_entity_tries_peer_user_before_marked_channel_ids(monkeypatch):
+    async def noop(_client):
+        return None
+
+    client = _ResolvingClient("entity", [ValueError("cold cache"), ValueError("still cold")])
+    monkeypatch.setattr(runtime, "ensure_connected", noop)
+
+    user_id = 6111895905
+    assert await runtime.resolve_entity(user_id, client) == f"entity:{PeerUser(user_id)}"
+    assert client.calls == [user_id, user_id, PeerUser(user_id)]
 
 
 @pytest.mark.asyncio
@@ -429,12 +445,15 @@ async def test_resolve_input_entity_tries_marked_id_candidates_after_cache_miss(
     async def noop(_client):
         return None
 
-    client = _ResolvingClient("input", [ValueError("not a user"), ValueError("still cold")])
+    client = _ResolvingClient(
+        "input",
+        [ValueError("not a user"), ValueError("still cold"), ValueError("peer user fail")],
+    )
     monkeypatch.setattr(runtime, "ensure_connected", noop)
 
     assert await runtime.resolve_input_entity(123, client) == "input:-1000000000123"
     assert client.dialogs_loaded == 1
-    assert client.calls == [123, 123, -1000000000123]
+    assert client.calls == [123, 123, PeerUser(123), -1000000000123]
 
 
 def test_json_serializer_handles_supported_and_unsupported_values():

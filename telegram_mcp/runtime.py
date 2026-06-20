@@ -731,10 +731,16 @@ async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
             except ValueError as error:
                 last_error = error
 
+    if isinstance(identifier, int) and identifier > 0:
+        try:
+            return await client.get_entity(types.PeerUser(identifier))
+        except Exception as error:
+            last_error = error
+
     for candidate in _marked_id_candidates(identifier):
         try:
             return await client.get_entity(candidate)
-        except ValueError as error:
+        except Exception as error:
             last_error = error
 
     raise ValueError(
@@ -774,10 +780,16 @@ async def resolve_input_entity(identifier: Union[int, str], client=None) -> Any:
             except ValueError as error:
                 last_error = error
 
+    if isinstance(identifier, int) and identifier > 0:
+        try:
+            return await client.get_input_entity(types.PeerUser(identifier))
+        except Exception as error:
+            last_error = error
+
     for candidate in _marked_id_candidates(identifier):
         try:
             return await client.get_input_entity(candidate)
-        except ValueError as error:
+        except Exception as error:
             last_error = error
 
     raise ValueError(

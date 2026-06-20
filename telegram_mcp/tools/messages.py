@@ -100,6 +100,11 @@ def message_to_dict(msg) -> dict:
     sender_id = getattr(msg, "sender_id", None)
     if sender_id is not None:
         d["sender_id"] = sender_id
+    sender = getattr(msg, "sender", None)
+    if sender is not None:
+        username = getattr(sender, "username", None)
+        if username:
+            d["sender_username"] = username
     if getattr(msg, "out", False):
         d["out"] = True
 
@@ -170,6 +175,19 @@ def message_to_dict(msg) -> dict:
         d["ttl_period"] = ttl
 
     return d
+
+
+def attach_sender_identity(record: dict, msg) -> dict:
+    """Add sender_id and sender_username to a compact message record."""
+    sender_id = getattr(msg, "sender_id", None)
+    if sender_id is not None:
+        record["sender_id"] = sender_id
+    sender = getattr(msg, "sender", None)
+    if sender is not None:
+        username = getattr(sender, "username", None)
+        if username:
+            record["sender_username"] = username
+    return record
 
 
 def format_message_line(msg) -> str:
@@ -785,6 +803,7 @@ async def list_messages(
             engagement = get_engagement_dict(msg)
             if engagement:
                 record["engagement"] = engagement
+            attach_sender_identity(record, msg)
             records.append(record)
 
         return format_tool_result(records)
@@ -842,6 +861,7 @@ async def get_message_context(
                 "is_target": msg.id == message_id,
                 "text": sanitize_user_content(msg.message),
             }
+            attach_sender_identity(record, msg)
             grouped_id = getattr(msg, "grouped_id", None)
             if grouped_id is not None:
                 record["grouped_id"] = grouped_id
@@ -1310,6 +1330,7 @@ async def search_messages(
             }
             if msg.reply_to and msg.reply_to.reply_to_msg_id:
                 record["reply_to"] = msg.reply_to.reply_to_msg_id
+            attach_sender_identity(record, msg)
             records.append(record)
         return format_tool_result(records)
     except Exception as e:
@@ -1349,16 +1370,16 @@ async def search_global(
             chat_name = (
                 getattr(chat, "title", None) or getattr(chat, "first_name", "") or str(msg.chat_id)
             )
-            records.append(
-                {
-                    "chat_name": sanitize_name(chat_name),
-                    "chat_id": msg.chat_id,
-                    "id": msg.id,
-                    "sender": get_sender_name(msg),
-                    "date": msg.date,
-                    "text": sanitize_user_content(msg.message),
-                }
-            )
+            record = {
+                "chat_name": sanitize_name(chat_name),
+                "chat_id": msg.chat_id,
+                "id": msg.id,
+                "sender": get_sender_name(msg),
+                "date": msg.date,
+                "text": sanitize_user_content(msg.message),
+            }
+            attach_sender_identity(record, msg)
+            records.append(record)
 
         return format_tool_result(records)
     except Exception as e:
@@ -1426,6 +1447,7 @@ async def get_pinned_messages(chat_id: Union[int, str], account: str = None) -> 
             }
             if msg.reply_to and msg.reply_to.reply_to_msg_id:
                 record["reply_to"] = msg.reply_to.reply_to_msg_id
+            attach_sender_identity(record, msg)
             records.append(record)
 
         return format_tool_result(records)

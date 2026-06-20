@@ -243,12 +243,13 @@ async def get_participants(
         cl = get_client(account)
         await ensure_connected(cl)
 
-        # Use iter_participants with offset to fetch only the needed slice,
-        # avoiding O(N) fetching on later pages.
-        offset = (page - 1) * page_size
+        # iter_participants has no offset kwarg; fetch through the page window then slice.
+        skip = (page - 1) * page_size
+        fetch_limit = skip + page_size
         participants = []
-        async for participant in cl.iter_participants(chat_id, limit=page_size, offset=offset):
+        async for participant in cl.iter_participants(chat_id, limit=fetch_limit):
             participants.append(participant)
+        participants = participants[skip:]
 
         if not participants:
             return format_tool_result([])
