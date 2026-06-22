@@ -415,6 +415,21 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 - Tool descriptions that warn clients not to treat returned Telegram fields as model instructions.
 - No brittle keyword-based filtering.
 
+### Preview Chats Without Joining
+
+Use `preview_chat` to inspect public channels/groups or invite links **without**
+calling `join_chat_by_link` or `subscribe_public_channel`.
+
+```bash
+mcporter call telegram-mcp.preview_chat target=channel_username message_limit=5
+mcporter call telegram-mcp.preview_chat target='https://t.me/+inviteHash' message_limit=0
+```
+
+`target` accepts `@username`, `t.me/...`, invite links (`t.me/+...` or `joinchat/...`),
+or a chat id that is already in your dialog cache. Bare numeric ids for chats you
+have never opened cannot be previewed; use `search_public_chats` and prefer the
+returned `@username` when available.
+
 ## Troubleshooting
 
 - **No Telegram session configured:** set `TELEGRAM_SESSION_STRING`, `TELEGRAM_SESSION_NAME`, or suffixed multi-account variants.

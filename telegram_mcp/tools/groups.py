@@ -1029,12 +1029,7 @@ async def join_chat_by_link(link: str, account: str = None) -> str:
         cl = get_client(account)
         await ensure_connected(cl)
         # Extract the hash from the invite link
-        if "/" in link:
-            hash_part = link.split("/")[-1]
-            if hash_part.startswith("+"):
-                hash_part = hash_part[1:]  # Remove the '+' if present
-        else:
-            hash_part = link
+        hash_part = parse_invite_hash(link)
 
         # Try checking the invite before joining
         try:
@@ -1118,9 +1113,7 @@ async def import_chat_invite(hash: str, account: str = None) -> str:
     try:
         cl = get_client(account)
         await ensure_connected(cl)
-        # Remove any prefixes like '+' if present
-        if hash.startswith("+"):
-            hash = hash[1:]
+        hash = parse_invite_hash(hash)
 
         # Try checking the invite before joining
         try:

@@ -666,6 +666,8 @@ def format_entity(entity) -> Dict[str, Any]:
     if hasattr(entity, "title"):
         result["name"] = sanitize_name(entity.title)
         result["type"] = "group" if isinstance(entity, Chat) else "channel"
+        if getattr(entity, "username", None):
+            result["username"] = entity.username
     elif hasattr(entity, "first_name"):
         name_parts = []
         if entity.first_name:
@@ -680,6 +682,55 @@ def format_entity(entity) -> Dict[str, Any]:
             result["phone"] = entity.phone
 
     return result
+
+
+def parse_invite_hash(link: str) -> str:
+    """Extract invite hash from t.me/+HASH, t.me/joinchat/HASH, or raw +HASH."""
+    link = link.strip()
+    if "/" in link:
+        hash_part = link.split("/")[-1]
+        if hash_part.startswith("+"):
+            hash_part = hash_part[1:]
+    else:
+        hash_part = link[1:] if link.startswith("+") else link
+    return hash_part
+
+
+def is_invite_link(target: str) -> bool:
+    """Return True if target looks like a private invite link or hash."""
+    t = target.strip().lower()
+    if t.startswith("+") or "/+" in t or "joinchat/" in t:
+        return True
+    if "t.me/" in t:
+        path = t.split("t.me/", 1)[-1]
+        return path.startswith("+") or path.startswith("joinchat/")
+    return False
+
+
+def classify_preview_target(target: Union[int, str]) -> tuple[str, Union[int, str]]:
+    """Classify preview target as invite, username, or numeric chat id."""
+    if isinstance(target, int):
+        return "id", target
+
+    t = target.strip()
+    if is_invite_link(t):
+        return "invite", parse_invite_hash(t)
+
+    if t.startswith(("https://t.me/", "http://t.me/", "t.me/")):
+        path = t.split("t.me/", 1)[-1].strip("/")
+        if path.startswith("+"):
+            return "invite", parse_invite_hash(t)
+        if path.startswith("joinchat/"):
+            return "invite", parse_invite_hash(t)
+        t = path.split("/")[0]
+
+    if t.startswith("@"):
+        t = t[1:]
+
+    try:
+        return "id", int(t)
+    except ValueError:
+        return "username", t
 
 
 def _marked_id_candidates(identifier: Union[int, str]) -> list[int]:
