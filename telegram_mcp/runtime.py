@@ -521,6 +521,72 @@ class ErrorCategory(str, Enum):
     FOLDER = "FOLDER"
 
 
+# Chinese guidance for common Telegram RPC errors (Telethon rpcerrorlist).
+RPC_ERROR_GUIDANCE_ZH: Dict[str, str] = {
+    "UserRestrictedError": (
+        "账号被 Telegram 限制（通常因被举报 spam），无法建群/频道或联系陌生人。"
+        "请联系 @SpamBot 申诉，暂停相关写操作。"
+    ),
+    "FloodWaitError": "请求过于频繁，请按 flood_wait_seconds 等待后重试。",
+    "PeerFloodError": "对陌生人或新目标操作过多，请降频并仅操作已有会话/联系人。",
+    "ChannelsTooMuchError": "拥有的频道/群组数量已达上限，请删除旧频道后重试。",
+    "ChatWriteForbiddenError": "当前账号在该会话无发言/写入权限。",
+    "UserBannedInChannelError": "账号在该群/频道被封禁。",
+    "ChannelPrivateError": "目标为私有频道/群，需邀请链接或已是成员。",
+    "InviteHashExpiredError": "邀请链接已过期或无效。",
+    "InviteHashInvalidError": "邀请链接格式无效。",
+    "UsernameNotOccupiedError": "用户名不存在或已注销。",
+    "UsernameInvalidError": "用户名格式无效。",
+    "ChatAdminRequiredError": "需要管理员权限才能执行此操作。",
+    "UserNotMutualContactError": "对方不是双向联系人，无法拉群。",
+    "UserPrivacyRestrictedError": "对方隐私设置阻止了此操作。",
+    "UsersTooFewError": "创建传统小群至少需要一名其他用户。",
+    "ChatTitleEmptyError": "群/频道标题不能为空。",
+}
+
+
+def describe_rpc_error(error: Exception) -> Dict[str, Any]:
+    """Extract structured RPC error details for user-facing responses."""
+    info: Dict[str, Any] = {
+        "error_type": type(error).__name__,
+        "message": str(error),
+    }
+    seconds = getattr(error, "seconds", None)
+    if seconds is not None:
+        info["flood_wait_seconds"] = seconds
+    request = getattr(error, "request", None)
+    if request is not None:
+        info["rpc_method"] = type(request).__name__
+    guidance = RPC_ERROR_GUIDANCE_ZH.get(type(error).__name__)
+    if guidance:
+        info["guidance_zh"] = guidance
+    return info
+
+
+def format_error_response(
+    function_name: str,
+    error: Exception,
+    error_code: str,
+    context: str = "",
+) -> str:
+    """Build a multi-line error string with RPC class, message, and guidance."""
+    lines = [f"Error in {function_name} (code: {error_code})"]
+    if context:
+        lines.append(f"Context: {context}")
+    lines.append(f"Type: {type(error).__name__}")
+    lines.append(f"Message: {error}")
+
+    rpc = describe_rpc_error(error)
+    if rpc.get("flood_wait_seconds") is not None:
+        lines.append(f"FloodWait: wait {rpc['flood_wait_seconds']} seconds before retry")
+    if rpc.get("rpc_method"):
+        lines.append(f"RPC method: {rpc['rpc_method']}")
+    if rpc.get("guidance_zh"):
+        lines.append(f"Guidance: {rpc['guidance_zh']}")
+    lines.append("Full traceback logged to mcp_errors.log")
+    return "\n".join(lines)
+
+
 def log_and_format_error(
     function_name: str,
     error: Exception,
@@ -569,7 +635,7 @@ def log_and_format_error(
     if user_message:
         return user_message
 
-    return f"An error occurred (code: {error_code}). Check mcp_errors.log for details."
+    return format_error_response(function_name, error, error_code, context)
 
 
 def validate_id(*param_names_to_validate):
@@ -921,7 +987,23 @@ def get_engagement_dict(message) -> Optional[Dict[str, Any]]:
     reactions = getattr(message, "reactions", None)
     if reactions is not None:
         results = getattr(reactions, "results", None)
-        result["reactions"] = sum(getattr(r, "count", 0) or 0 for r in results) if results else 0
+        if results:
+            total = sum(getattr(r, "count", 0) or 0 for r in results)
+            result["reactions"] = total
+            breakdown = []
+            for item in results:
+                reaction = getattr(item, "reaction", None)
+                emoji = None
+                if reaction is not None:
+                    emoji = getattr(reaction, "emoticon", None) or str(reaction)
+                breakdown.append(
+                    {
+                        "emoji": emoji,
+                        "count": getattr(item, "count", 0) or 0,
+                    }
+                )
+            if breakdown:
+                result["reactions_detail"] = breakdown
     return result if result else None
 
 

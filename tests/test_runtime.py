@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import telethon.errors.rpcerrorlist
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData, ToolAnnotations
@@ -612,7 +613,11 @@ def test_message_formatting_sender_and_engagement_helpers():
         == "A Group"
     )
     assert runtime.get_engagement_info(message) == " | views:10, forwards:2, reactions:3"
-    assert runtime.get_engagement_dict(message) == {"views": 10, "forwards": 2, "reactions": 3}
+    engagement = runtime.get_engagement_dict(message)
+    assert engagement["views"] == 10
+    assert engagement["forwards"] == 2
+    assert engagement["reactions"] == 3
+    assert len(engagement["reactions_detail"]) == 2
     assert runtime.get_engagement_info(SimpleNamespace()) == ""
     assert runtime.get_engagement_dict(SimpleNamespace()) is None
 
@@ -629,7 +634,14 @@ def test_log_and_format_error_returns_custom_and_generated_messages(caplog):
 
     generated = runtime.log_and_format_error("get_chat", RuntimeError("boom"))
     assert "code: CHAT-ERR-" in generated
-    assert "Check mcp_errors.log" in generated
+    assert "Type: RuntimeError" in generated
+    assert "mcp_errors.log" in generated
+
+    rpc_err = telethon.errors.rpcerrorlist.UserRestrictedError(None)
+    rpc_msg = runtime.log_and_format_error("create_channel", rpc_err, title="t")
+    assert "UserRestrictedError" in rpc_msg
+    assert "Guidance:" in rpc_msg
+    assert "@SpamBot" in rpc_msg
 
 
 def test_path_helper_edges(tmp_path, monkeypatch):
