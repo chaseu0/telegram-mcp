@@ -8,8 +8,12 @@ except UnsafeInstallationError as exc:
     raise SystemExit(str(exc)) from None
 
 from telegram_mcp import runtime as _runtime
+from telegram_mcp.bridge import run_stdio_sse_bridge
 from telegram_mcp.runtime import *
+from telegram_mcp import singleton
 import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
+
+_RUNNER_FLAGS = frozenset({"--serve", "--stdio-direct"})
 
 
 async def _connect_authorized_client(label, client) -> None:
@@ -26,55 +30,132 @@ async def _connect_authorized_client(label, client) -> None:
     )
 
 
-async def _main() -> None:
-    try:
-        labels = ", ".join(clients.keys())
-        print(f"Starting {len(clients)} Telegram client(s) ({labels})...", file=sys.stderr)
-        await asyncio.gather(
-            *(_connect_authorized_client(label, cl) for label, cl in clients.items())
-        )
+async def _bootstrap_telegram_clients() -> None:
+    labels = ", ".join(clients.keys())
+    print(f"Starting {len(clients)} Telegram client(s) ({labels})...", file=sys.stderr)
+    await asyncio.gather(
+        *(_connect_authorized_client(label, cl) for label, cl in clients.items())
+    )
 
-        # Warm entity caches — StringSession has no persistent cache,
-        # so fetch all dialogs once per client to populate them.
-        # Runs in background: blocking startup on this (e.g. under a
-        # GetDialogsRequest flood wait) makes MCP clients time out, and
-        # resolve_entity() re-warms the cache on miss anyway.
-        print("Warming entity caches (background)...", file=sys.stderr)
+    print("Warming entity caches (background)...", file=sys.stderr)
 
-        async def _warm_caches() -> None:
-            try:
-                await asyncio.gather(*(cl.get_dialogs() for cl in clients.values()))
-                print("Entity caches warmed.", file=sys.stderr)
-            except Exception as warm_exc:
-                print(f"Entity cache warm failed: {warm_exc}", file=sys.stderr)
-
-        warm_task = asyncio.create_task(_warm_caches())
-
-        print(f"Telegram client(s) started ({labels}). Running MCP server...", file=sys.stderr)
-        # Use the asynchronous entrypoint instead of mcp.run()
-        await mcp.run_stdio_async()
-    except Exception as e:
-        print(f"Error starting client: {e}", file=sys.stderr)
-        if isinstance(e, sqlite3.OperationalError) and "database is locked" in str(e):
-            print(
-                "Database lock detected. Please ensure no other instances are running.",
-                file=sys.stderr,
-            )
-        sys.exit(1)
-    finally:
+    async def _warm_caches() -> None:
         try:
-            await asyncio.gather(
-                *(cl.disconnect() for cl in clients.values()), return_exceptions=True
-            )
-        except Exception:
-            pass
+            await asyncio.gather(*(cl.get_dialogs() for cl in clients.values()))
+            print("Entity caches warmed.", file=sys.stderr)
+        except Exception as warm_exc:
+            print(f"Entity cache warm failed: {warm_exc}", file=sys.stderr)
+
+    asyncio.create_task(_warm_caches())
+    print(f"Telegram client(s) started ({labels}).", file=sys.stderr)
+
+
+async def _disconnect_clients() -> None:
+    try:
+        await asyncio.gather(*(cl.disconnect() for cl in clients.values()), return_exceptions=True)
+    except Exception:
+        pass
+
+
+def _handle_startup_error(exc: Exception) -> None:
+    print(f"Error starting client: {exc}", file=sys.stderr)
+    if isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc):
+        print(
+            "Database lock detected. Enable TELEGRAM_MCP_SINGLETON=1 (default) so only "
+            "one Telethon session runs, or stop duplicate telegram-mcp processes.",
+            file=sys.stderr,
+        )
+    sys.exit(1)
+
+
+async def _main_stdio_direct() -> None:
+    """Legacy mode: Telethon + MCP stdio in this process (one client per spawn)."""
+    try:
+        await _bootstrap_telegram_clients()
+        print("Running MCP server (stdio, direct)...", file=sys.stderr)
+        await mcp.run_stdio_async()
+    except Exception as exc:
+        _handle_startup_error(exc)
+    finally:
+        await _disconnect_clients()
+
+
+async def _serve_main() -> None:
+    """Singleton daemon: one Telethon session + MCP over SSE."""
+    if singleton.is_port_open():
+        print(
+            f"telegram-mcp singleton already listening on {singleton.get_sse_url()}",
+            file=sys.stderr,
+        )
+        return
+
+    daemon_lock = None
+    try:
+        daemon_lock = singleton.acquire_daemon_lock(nonblocking=True)
+    except BlockingIOError:
+        if singleton.is_port_open():
+            print("Another telegram-mcp daemon is already running.", file=sys.stderr)
+            return
+        singleton._wait_for_port()
+        return
+
+    try:
+        await _bootstrap_telegram_clients()
+        singleton.write_pid_file()
+        print(
+            f"telegram-mcp singleton SSE server at {singleton.get_sse_url()} "
+            f"(pid {os.getpid()})",
+            file=sys.stderr,
+        )
+        await mcp.run_sse_async()
+    except Exception as exc:
+        _handle_startup_error(exc)
+    finally:
+        singleton.remove_pid_file()
+        if daemon_lock is not None:
+            daemon_lock.release()
+        await _disconnect_clients()
+
+
+async def _main_singleton_stdio() -> None:
+    """Connect stdio to the shared singleton SSE server (no local Telethon)."""
+    try:
+        sse_url = singleton.ensure_singleton_server_running()
+        print(f"Bridging stdio to singleton server at {sse_url}", file=sys.stderr)
+        await run_stdio_sse_bridge(sse_url)
+    except Exception as exc:
+        print(f"Error connecting to singleton server: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _split_runner_argv(argv: list[str]) -> tuple[bool, bool, list[str]]:
+    serve = "--serve" in argv
+    stdio_direct = "--stdio-direct" in argv
+    filtered = [arg for arg in argv if arg not in _RUNNER_FLAGS]
+    return serve, stdio_direct, filtered
+
+
+def serve_entry() -> None:
+    """Console entry for `telegram-mcp-serve` (explicit singleton daemon)."""
+    serve, _stdio_direct, filtered_argv = _split_runner_argv(sys.argv[1:])
+    _configure_allowed_roots_from_cli(filtered_argv)
+    _runtime._apply_exposed_tools_mode()
+    nest_asyncio.apply()
+    asyncio.run(_serve_main())
 
 
 def main() -> None:
-    _configure_allowed_roots_from_cli(sys.argv[1:])
+    serve, stdio_direct, filtered_argv = _split_runner_argv(sys.argv[1:])
+    _configure_allowed_roots_from_cli(filtered_argv)
     _runtime._apply_exposed_tools_mode()
     nest_asyncio.apply()
-    asyncio.run(_main())
+
+    if serve:
+        asyncio.run(_serve_main())
+    elif stdio_direct or not singleton.singleton_enabled():
+        asyncio.run(_main_stdio_direct())
+    else:
+        asyncio.run(_main_singleton_stdio())
 
 
 if __name__ == "__main__":

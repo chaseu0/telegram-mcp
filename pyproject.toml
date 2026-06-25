@@ -49,6 +49,7 @@ packages = ["telegram_mcp", "telegram_mcp.tools"]
 
 [project.scripts]
 telegram-mcp = "main:main"
+telegram-mcp-serve = "telegram_mcp.runner:serve_entry"
 telegram-mcp-generate-session = "session_string_generator:main"
 
 [tool.black]

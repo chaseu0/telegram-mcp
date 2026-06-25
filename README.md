@@ -29,6 +29,8 @@ Message sent successfully:
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [MCP Client Configuration](#mcp-client-configuration)
+- [Singleton Server (Parallel Agents)](#singleton-server-parallel-agents)
+- [Agent Skills](#agent-skills)
 - [Multi-Account Setup](#multi-account-setup)
 - [Proxy Support](#proxy-support)
 - [File Path Security](#file-path-security)
@@ -152,7 +154,9 @@ this project:
       "env": {
         "TELEGRAM_API_ID": "your_api_id_here",
         "TELEGRAM_API_HASH": "your_api_hash_here",
-        "TELEGRAM_SESSION_STRING": "your_session_string_here"
+        "TELEGRAM_SESSION_STRING": "your_session_string_here",
+        "TELEGRAM_MCP_SINGLETON": "1",
+        "TELEGRAM_MCP_PORT": "18765"
       }
     }
   }
@@ -185,7 +189,9 @@ Then configure your MCP client to run the installed console script:
       "env": {
         "TELEGRAM_API_ID": "your_api_id_here",
         "TELEGRAM_API_HASH": "your_api_hash_here",
-        "TELEGRAM_SESSION_STRING": "your_session_string_here"
+        "TELEGRAM_SESSION_STRING": "your_session_string_here",
+        "TELEGRAM_MCP_SINGLETON": "1",
+        "TELEGRAM_MCP_PORT": "18765"
       }
     }
   }
@@ -198,6 +204,63 @@ from GitHub explicitly:
 ```bash
 uvx --from "git+https://github.com/chigwell/telegram-mcp.git@<pinned-release-tag-or-commit>" telegram-mcp-generate-session
 ```
+
+## Singleton Server (Parallel Agents)
+
+Multiple MCP clients (parallel Cursor agents, mcporter, several chat windows) each
+spawn a `main.py` process. Without singleton mode, every process opens its own
+Telethon connection on the same session → `database is locked`, auth conflicts,
+and many heavy `python main.py` processes in `ps`.
+
+**Default: `TELEGRAM_MCP_SINGLETON=1`**
+
+| Process | Command line | Telethon |
+|---------|--------------|----------|
+| Daemon (one per machine) | `main.py --serve` | Yes |
+| MCP client bridge | `main.py` (no `--serve`) | No — stdio → SSE |
+
+```
+Cursor Agent A ──┐
+Cursor Agent B ──┼──► main.py (bridge) ──► http://127.0.0.1:18765/sse ──► main.py --serve (Telethon)
+mcporter      ───┘
+```
+
+**Verify:**
+
+```bash
+ps -ww -ax -o pid,rss,command | grep 'main.py'
+lsof -iTCP:18765 -sTCP:LISTEN
+```
+
+Expect **one** line containing `--serve` (RSS ~30–50 MB) and zero or more bridges
+without `--serve` (RSS ~10–20 MB).
+
+**Manual daemon:**
+
+```bash
+uv run main.py --serve
+# equivalent: uv run telegram-mcp-serve
+```
+
+**Disable** (debug only — do not use with parallel agents on one session):
+
+```bash
+TELEGRAM_MCP_SINGLETON=0 uv run main.py
+# or: uv run main.py --stdio-direct
+```
+
+Full reference: [docs/singleton-server.md](docs/singleton-server.md)
+
+## Agent Skills
+
+Task workflows for coding agents live under [`skills/`](skills/README.md):
+
+| Skill | Use when |
+|-------|----------|
+| [telegram-jisou-group-search](skills/telegram-jisou-group-search/SKILL.md) | 找群 via @jisou, parse `links`/`entities`, `preview_chat` quality checks |
+
+See also [AGENTS.md](AGENTS.md) and [docs/structured-messages.md](docs/structured-messages.md)
+for message JSON fields (`entities`, `links`, reactions).
 
 ## Multi-Account Setup
 
@@ -439,7 +502,8 @@ returned `@username` when available.
   Then set `TELEGRAM_SESSION_STRING` in `.env`. The MCP server does not perform
   interactive phone-code login over stdio.
 - **Invalid API credentials:** verify `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` at [my.telegram.org/apps](https://my.telegram.org/apps).
-- **Database is locked:** prefer string sessions, or make sure no other process is using the same file session.
+- **Database is locked:** prefer string sessions. Enable singleton mode (default `TELEGRAM_MCP_SINGLETON=1`) so only one Telethon session runs; see [docs/singleton-server.md](docs/singleton-server.md).
+- **Many `telegram-mcp` / `main.py` processes:** kill stale processes (`pkill -f 'telegram-mcp.*main.py'`), start one daemon (`uv run main.py --serve`), Reload MCP in Cursor. Only **one** process should have `--serve` in its command line.
 - **File tools are disabled:** pass allowed roots or configure MCP Roots in your client.
 - **Path rejected:** ensure the path is inside an allowed root and does not use traversal or wildcard patterns.
 - **Auth errors after password changes:** regenerate your session string.

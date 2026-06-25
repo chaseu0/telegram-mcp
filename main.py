@@ -13,7 +13,7 @@ except UnsafeInstallationError as exc:
 
 from telegram_mcp import runtime as _runtime
 from telegram_mcp.runtime import *
-from telegram_mcp.runner import _main, main
+from telegram_mcp.runner import _main_stdio_direct as _main, main
 from telegram_mcp.tools import *
 
 # Backward-compatible alias for callers/tests that monkeypatch main.SERVER_ALLOWED_ROOTS.
