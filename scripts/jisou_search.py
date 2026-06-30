@@ -22,6 +22,8 @@ from pathlib import Path
 
 MCP = os.environ.get("MCP_URL", "http://127.0.0.1:18765/sse")
 JISOU_SENDER_ID = 5762373625
+# Numeric ID avoids ResolveUsernameRequest FloodWait on chat_id=jisou
+JISOU_CHAT_ID = os.environ.get("JISOU_CHAT_ID", str(JISOU_SENDER_ID))
 BUTTON_WAIT = 3.0
 SEARCH_WAIT = 4.0
 SKIP_USERNAMES = re.compile(r"jisou\d*bot", re.I)
@@ -112,23 +114,26 @@ def next_page_button(msg: dict | None) -> str | None:
 def press_button(message_id: int, button_text: str) -> dict:
     return mcporter(
         "press_inline_button",
-        chat_id="jisou",
+        chat_id=JISOU_CHAT_ID,
         message_id=message_id,
         button_text=button_text,
     )  # type: ignore[return-value]
 
 
 def fetch_bot_message() -> dict | None:
-    msgs = mcporter("get_messages", chat_id="jisou", page=1, page_size=5)
+    msgs = mcporter("get_messages", chat_id=JISOU_CHAT_ID, page=1, page_size=5)
     return find_bot_msg(msgs if isinstance(msgs, dict) else None)
 
 
-def wait_for_edit(message_id: int, before_hash: str, retries: int = 3) -> dict | None:
+def wait_for_edit(message_id: int, before_hash: str, retries: int = 5) -> dict | None:
     for _ in range(retries):
         time.sleep(BUTTON_WAIT)
         msg = fetch_bot_message()
-        if msg and msg.get("id") == message_id and text_hash(msg) != before_hash:
-            return msg
+        if msg and msg.get("id") == message_id:
+            if text_hash(msg) != before_hash:
+                return msg
+            if msg.get("edited"):
+                return msg
     return fetch_bot_message()
 
 
@@ -140,7 +145,7 @@ def paginate_keyword(
     out_dir: Path | None = None,
 ) -> dict:
     print(f"[search] keyword={keyword!r} filter={'👥' if group_filter else 'none'} max_pages={max_pages}")
-    send = mcporter("send_message", chat_id="jisou", message=keyword)
+    send = mcporter("send_message", chat_id=JISOU_CHAT_ID, message=keyword)
     if isinstance(send, dict) and ("_error" in send or "FloodWait" in str(send)):
         return {"keyword": keyword, "error": send, "targets": []}
 
