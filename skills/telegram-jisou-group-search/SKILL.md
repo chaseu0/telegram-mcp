@@ -37,9 +37,9 @@ description: >-
 ### 1. 发送关键词
 
 ```bash
-mcporter call telegram-mcp.send_message chat_id=jisou message='币圈' 2>/dev/null
+mcporter call telegram-mcp.send_message chat_id=5762373625 message='币圈' 2>/dev/null
 sleep 3
-mcporter call telegram-mcp.get_messages chat_id=jisou page=1 page_size=5 2>/dev/null
+mcporter call telegram-mcp.get_messages chat_id=5762373625 page=1 page_size=5 2>/dev/null
 ```
 
 从 `results` 取极搜 bot 消息（`sender_id: 5762373625`），记下 `id`。
@@ -47,9 +47,9 @@ mcporter call telegram-mcp.get_messages chat_id=jisou page=1 page_size=5 2>/dev/
 ### 2. 👥 筛选（找群必做）
 
 ```bash
-mcporter call telegram-mcp.press_inline_button chat_id=jisou message_id=531 button_text='👥' 2>/dev/null
+mcporter call telegram-mcp.press_inline_button chat_id=5762373625 message_id=531 button_text='👥' 2>/dev/null
 sleep 3
-mcporter call telegram-mcp.get_messages chat_id=jisou page=1 page_size=3 2>/dev/null
+mcporter call telegram-mcp.get_messages chat_id=5762373625 page=1 page_size=3 2>/dev/null
 ```
 
 未筛选的首页混合 👥 群与 📢 频道；关键词「币圈」首页约 17 条链接中仅 ~3 条为群，翻 3 页无筛选共 ~36 条链接、仅 ~6 条群标记。点 👥 后每页应几乎全是群组，翻 10+ 页可获 100+ 群链接。
@@ -58,10 +58,10 @@ mcporter call telegram-mcp.get_messages chat_id=jisou page=1 page_size=3 2>/dev/
 
 ```bash
 # 第 1 页 → 第 2 页
-mcporter call telegram-mcp.press_inline_button chat_id=jisou message_id=531 button_text='下一页' 2>/dev/null
+mcporter call telegram-mcp.press_inline_button chat_id=5762373625 message_id=531 button_text='下一页' 2>/dev/null
 sleep 3
 # 第 2 页起用 ➡️（不是「下一页」）
-mcporter call telegram-mcp.press_inline_button chat_id=jisou message_id=531 button_text='➡️' 2>/dev/null
+mcporter call telegram-mcp.press_inline_button chat_id=5762373625 message_id=531 button_text='➡️' 2>/dev/null
 ```
 
 停止条件：本页无新链接 / 无翻页按钮 / 达到 `max_pages`（建议 ≥ 10）。
