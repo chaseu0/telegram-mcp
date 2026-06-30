@@ -5,6 +5,7 @@
 | Skill | 路径 | 触发场景 |
 |-------|------|----------|
 | 极搜 @jisou 找群 | [telegram-jisou-group-search/SKILL.md](telegram-jisou-group-search/SKILL.md) | 找群、极搜、关键词搜索、验证群链接是否可访问 |
+| 极搜内联按钮 | [telegram-jisou-buttons/SKILL.md](telegram-jisou-buttons/SKILL.md) | 👥 筛选、翻页、callback 解码、press_inline_button 自动化 |
 
 ## 在 Cursor 中挂载（可选）
 
