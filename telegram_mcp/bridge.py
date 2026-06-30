@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from functools import partial
 import subprocess
 import time
 from typing import Callable
@@ -115,16 +116,10 @@ async def run_stdio_sse_bridge(sse_url: str) -> None:
                 async with anyio.create_task_group() as tg:
                     tg.start_soon(_bridge_watchdog, last_activity, tg.cancel_scope)
                     tg.start_soon(
-                        _pipe,
-                        stdio_read,
-                        sse_write,
-                        on_activity=_mark_activity,
+                        partial(_pipe, stdio_read, sse_write, on_activity=_mark_activity),
                     )
                     tg.start_soon(
-                        _pipe,
-                        sse_read,
-                        stdio_write,
-                        on_activity=_mark_activity,
+                        partial(_pipe, sse_read, stdio_write, on_activity=_mark_activity),
                     )
     finally:
         cleanup.remove_bridge_heartbeat()
