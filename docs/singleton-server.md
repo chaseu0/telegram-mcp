@@ -1,170 +1,115 @@
 # 单实例 MCP 服务器（Singleton）
 
-并行任务（多个 Cursor Agent、mcporter、MCP 客户端）若各自 `spawn` 一个 `telegram-mcp`，会各自连接 Telethon，共用同一 session 时常见：
+多个 Cursor Agent / 会话 / mcporter **互相不知道对方的存在**，但会同时 `spawn` MCP。设计目标：
 
-- `sqlite3.OperationalError: database is locked`（文件 session）
-- Auth key 冲突、消息状态错乱
-- `ps` 中出现大量 `python main.py` 进程
-
-**默认开启单实例模式**（`TELEGRAM_MCP_SINGLETON=1`）：全局只有 **一个** 带 Telethon 的守护进程；每个 MCP 客户端进程只做 **stdio ↔ SSE 桥接**，不再重复登录 Telegram。
+1. **全局只有一个** Telethon 守护进程（`--serve`）
+2. **所有 MCP 客户端只做 stdio 桥接**，不各自登录 Telegram
+3. **不以「僵死 pid / 锁文件」冒充运行中** — 以 **端口是否在监听** 为准
 
 ## 架构
 
 ```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│ Cursor #1   │  │ Cursor #2   │  │ mcporter    │
-│ main.py     │  │ main.py     │  │ main.py     │
-│ (stdio桥接) │  │ (stdio桥接) │  │ (stdio桥接) │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │                │                │
-       └────────────────┼────────────────┘
-                        │ HTTP SSE
-                        ▼
-              ┌─────────────────────┐
-              │ main.py --serve     │
-              │ Telethon + MCP SSE  │
-              │ 127.0.0.1:18765     │
-              └─────────────────────┘
+Agent A ──► main.py (桥接) ──┐
+Agent B ──► main.py (桥接) ──┼──► http://127.0.0.1:18765/sse ──► main.py --serve (唯一 Telethon)
+Agent C ──► main.py (桥接) ──┘
 ```
 
-| 进程命令行 | 角色 | 是否连接 Telethon |
-|-----------|------|-------------------|
-| `python main.py --serve` | 守护进程 | **是**（唯一） |
-| `python main.py`（无 `--serve`） | stdio 桥接 | **否**（转发到 SSE） |
+| 进程 | 命令行 | Telethon |
+|------|--------|----------|
+| 守护进程 | `main.py --serve` | **是**（全机唯一） |
+| MCP 客户端 | `main.py`（无 `--serve`） | **否** |
+
+## 真相来源（避免不一致状态）
+
+| 信号 | 含义 |
+|------|------|
+| **`127.0.0.1:PORT` 可连接** | 守护进程 **正在运行**（权威） |
+| `daemon-{port}.pid` | 辅助记录；启动时写入，退出 / SIGTERM 时删除 |
+| `daemon-{port}.lock` | 守护进程存活期间 flock；**进程死亡后内核自动释放** |
+| `spawn-{port}.lock` | 仅用于「谁有权 subprocess 拉起守护进程」，**拉起后立即释放** |
+
+每次桥接或 `--serve` 启动前会执行 `reconcile_stale_state()`：**若 pid 文件中进程已不存在，自动删除 pid 文件**。
+
+> 旧版 bug：桥接进程与守护进程共用同一把锁，桥接等待端口时持有锁，守护进程永远拿不到锁 → 120s 超时。现已拆分为 `spawn` / `daemon` 两把锁。
 
 ## 环境变量
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `TELEGRAM_MCP_SINGLETON` | `1` | `1` 启用单实例；`0` 恢复旧行为（每进程独立 Telethon，易冲突） |
-| `TELEGRAM_MCP_PORT` | `18765` | SSE 监听端口 |
-| `TELEGRAM_MCP_HOST` | `127.0.0.1` | 绑定地址（仅本机） |
-| `TELEGRAM_MCP_CACHE_DIR` | `~/.cache/telegram-mcp` | 锁文件、pid、守护进程日志 |
-| `TELEGRAM_MCP_STARTUP_TIMEOUT` | `120` | 等待守护进程就绪的秒数 |
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `TELEGRAM_MCP_SINGLETON` | `1` | 启用桥接模式 |
+| `TELEGRAM_MCP_AUTO_SPAWN` | `1` | `0` = 客户端**只连接、不拉起**守护进程（多 Agent 推荐） |
+| `TELEGRAM_MCP_PORT` | `18765` | SSE 端口 |
+| `TELEGRAM_MCP_HOST` | `127.0.0.1` | 绑定地址 |
+| `TELEGRAM_MCP_CACHE_DIR` | `~/.cache/telegram-mcp` | 锁、pid、日志 |
+| `TELEGRAM_MCP_STARTUP_TIMEOUT` | `120` | 等待端口就绪秒数 |
 
-运行时文件（以默认端口为例）：
+### 多 Agent 推荐配置
 
-| 路径 | 内容 |
-|------|------|
-| `~/.cache/telegram-mcp/singleton-18765.lock` | 守护进程持有 flock |
-| `~/.cache/telegram-mcp/singleton-18765.pid` | 守护进程 PID |
-| `~/.cache/telegram-mcp/serve-18765.log` | 守护进程 stdout/stderr |
-
-## MCP 客户端配置（推荐）
-
-`mcp.json` **无需改成 URL**，继续用 `command` + `uv run main.py` 即可。首次连接会自动拉起守护进程。
+**先单独起一个守护进程**（登录项、tmux、launchd 均可），MCP 客户端禁止自动拉起：
 
 ```json
-{
-  "mcpServers": {
-    "telegram-mcp": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/full/path/to/telegram-mcp",
-        "run",
-        "main.py"
-      ],
-      "env": {
-        "TELEGRAM_API_ID": "your_api_id",
-        "TELEGRAM_API_HASH": "your_api_hash",
-        "TELEGRAM_SESSION_STRING": "your_session_string",
-        "TELEGRAM_MCP_SINGLETON": "1",
-        "TELEGRAM_MCP_PORT": "18765"
-      }
-    }
-  }
+"env": {
+  "TELEGRAM_MCP_SINGLETON": "1",
+  "TELEGRAM_MCP_AUTO_SPAWN": "0",
+  "TELEGRAM_MCP_PORT": "18765"
 }
 ```
 
-建议 **优先使用 `TELEGRAM_SESSION_STRING`**（StringSession），避免文件 session 与多进程历史问题。
-
-## 手动运维
-
-### 启动守护进程（可选）
-
-首次有 MCP 客户端连接时会自动拉起；也可手动先起：
+守护进程启动一次：
 
 ```bash
-cd /path/to/telegram-mcp
-set -a && source .env && set +a
-uv run main.py --serve
-# 或
+cd /path/to/telegram-mcp && set -a && source .env && set +a
 uv run telegram-mcp-serve
 ```
 
-stderr 示例：
+之后任意数量的 Agent 只会桥接到已有 SSE，**不会**各自 `Popen --serve`。
 
-```
-telegram-mcp singleton SSE server at http://127.0.0.1:18765/sse (pid 61459)
-```
+若 `AUTO_SPAWN=0` 且守护进程未运行，桥接会明确报错并提示执行 `telegram-mcp-serve`，而不是静默死锁。
 
-### 验证进程形态
+### 单用户 / 自动拉起（默认）
+
+`TELEGRAM_MCP_AUTO_SPAWN=1` 时：第一个连上的客户端通过 `spawn.lock` **尝试拉起一次**守护进程；其他并发客户端只 **等待端口**，不会重复 spawn。
+
+## 运行时文件（端口 18765）
+
+| 路径 | 说明 |
+|------|------|
+| `daemon-18765.pid` | 守护进程 PID（进程死后会被 reconcile 清掉） |
+| `daemon-18765.lock` | 守护进程 flock |
+| `spawn-18765.lock` | 短暂 spawn 协调 |
+| `serve-18765.log` | 守护进程日志 |
+| 仓库内 `mcp_errors.log` | MCP 工具 RPC 错误 |
+
+## 验证
 
 ```bash
-ps -ww -ax -o pid,rss,command | grep 'telegram-mcp\|MCP-AI/telegram-mcp.*main.py'
+# 应只有 1 行含 --serve
+ps -ww -ax -o pid,rss,command | grep 'main.py'
+
 lsof -iTCP:18765 -sTCP:LISTEN
-cat ~/.cache/telegram-mcp/singleton-18765.pid
+
+# pid 应对应存活进程
+cat ~/.cache/telegram-mcp/daemon-18765.pid
+kill -0 $(cat ~/.cache/telegram-mcp/daemon-18765.pid) && echo alive
 ```
 
-**健康形态**：
-
-- **恰好 1 个** 含 `--serve` 的 `main.py`（RSS 通常 30–50 MB，含 Telethon）
-- 若干 **无** `--serve` 的 `main.py`（桥接，RSS 通常 10–20 MB）
-- 端口 `18765` 仅被守护进程 PID 监听
-
-### 清理并重启
+## 清理与重启
 
 ```bash
-# 停掉全部实例（含守护进程与桥接）
 pkill -f 'telegram-mcp.*main.py' || true
-pkill -f 'MCP-AI/telegram-mcp' || true
+rm -f ~/.cache/telegram-mcp/daemon-18765.pid   # 可选；reconcile 也会清僵死 pid
 
-# 重新拉起守护进程
-cd /path/to/telegram-mcp && set -a && source .env && set +a && uv run main.py --serve
+cd /path/to/telegram-mcp && set -a && source .env && set +a
+uv run telegram-mcp-serve
 ```
 
-然后在 Cursor 中 **Reload MCP** 或重启窗口。
-
-### 关闭单实例（调试用）
-
-```bash
-TELEGRAM_MCP_SINGLETON=0 uv run main.py
-# 或
-uv run main.py --stdio-direct
-```
-
-每个 MCP 客户端将独立连接 Telethon——**不要**在并行任务下对同一 session 使用此模式。
-
-## mcporter
-
-```bash
-mcporter call telegram-mcp.get_me 2>/dev/null
-```
-
-mcporter 配置的 `telegram-mcp` 命令与 Cursor 相同；单实例逻辑在 `main.py` 入口统一处理。
-
-## 错误与 RPC 反馈
-
-工具失败时返回多行可读信息（不再只有 `GEN-ERR-xxx`）：
-
-```
-Error in create_channel (code: GEN-ERR-050)
-Type: UserRestrictedError
-Message: You're spamreported, you can't create channels or chats.
-Guidance: 账号被 Telegram 限制...请联系 @SpamBot...
-```
-
-完整 traceback 在仓库目录下的 `mcp_errors.log`。
-
-常见 RPC 与处理见 [skills/telegram-jisou-group-search/SKILL.md](../skills/telegram-jisou-group-search/SKILL.md) 风控表，或 Telegram [Spam FAQ](https://telegram.org/faq_spam)。
+Cursor：**Reload MCP**。
 
 ## 故障排查
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| 多个 `main.py` 且都无 `--serve` | 旧进程未清、或未更新到含 singleton 的代码 | `pkill` 后重装/指向最新 fork，`Reload MCP` |
-| 多个 `--serve` | 端口冲突或重复手动启动 | 只保留一个，改 `TELEGRAM_MCP_PORT` |
-| `singleton server did not become ready` | 守护进程启动失败 | 查看 `serve-<port>.log`、`mcp_errors.log` |
-| `database is locked` | 仍有多 Telethon 或文件 session 冲突 | 确认 singleton=1，换 StringSession |
-| 桥接正常但工具超时 | 守护进程 Telethon 冷启动 / FloodWait | 先手动 `--serve` 预热，降低调用频率 |
+| pid 存在但进程不在 | 守护进程被 kill -9 | 已自动 reconcile；或手动删 pid 后重启 serve |
+| `daemon not ready` 120s | 旧版锁死锁 / 守护启动失败 | 更新到最新代码；看 `serve-*.log` |
+| 多个 `--serve` | 旧代码或 AUTO_SPAWN 竞态 | 只保留一个；多 Agent 用 `AUTO_SPAWN=0` |
+| `No daemon listening` + AUTO_SPAWN=0 | 未先起 serve | `uv run telegram-mcp-serve` |

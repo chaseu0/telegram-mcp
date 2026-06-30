@@ -82,9 +82,13 @@ async def _main_stdio_direct() -> None:
 
 async def _serve_main() -> None:
     """Singleton daemon: one Telethon session + MCP over SSE."""
+    singleton.reconcile_stale_state()
+
     if singleton.is_port_open():
+        pid = singleton.read_daemon_pid()
         print(
-            f"telegram-mcp singleton already listening on {singleton.get_sse_url()}",
+            f"telegram-mcp daemon already listening on {singleton.get_sse_url()} "
+            f"(pid {pid or 'unknown'})",
             file=sys.stderr,
         )
         return
@@ -93,18 +97,24 @@ async def _serve_main() -> None:
     try:
         daemon_lock = singleton.acquire_daemon_lock(nonblocking=True)
     except BlockingIOError:
-        if singleton.is_port_open():
-            print("Another telegram-mcp daemon is already running.", file=sys.stderr)
-            return
-        singleton._wait_for_port()
+        # Another process is starting or running the daemon; wait for the port.
+        print(
+            "Daemon lock held by another process; waiting for SSE port...",
+            file=sys.stderr,
+        )
+        try:
+            singleton._wait_for_port()
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
         return
 
+    singleton.register_daemon_shutdown_hooks()
     try:
         await _bootstrap_telegram_clients()
         singleton.write_pid_file()
         print(
-            f"telegram-mcp singleton SSE server at {singleton.get_sse_url()} "
-            f"(pid {os.getpid()})",
+            f"telegram-mcp daemon SSE at {singleton.get_sse_url()} (pid {os.getpid()})",
             file=sys.stderr,
         )
         await mcp.run_sse_async()
@@ -120,11 +130,16 @@ async def _serve_main() -> None:
 async def _main_singleton_stdio() -> None:
     """Connect stdio to the shared singleton SSE server (no local Telethon)."""
     try:
+        singleton.reconcile_stale_state()
         sse_url = singleton.ensure_singleton_server_running()
-        print(f"Bridging stdio to singleton server at {sse_url}", file=sys.stderr)
+        status = singleton.daemon_status()
+        print(
+            f"Bridging stdio to shared daemon at {sse_url} (status={status})",
+            file=sys.stderr,
+        )
         await run_stdio_sse_bridge(sse_url)
     except Exception as exc:
-        print(f"Error connecting to singleton server: {exc}", file=sys.stderr)
+        print(f"Error connecting to shared daemon: {exc}", file=sys.stderr)
         sys.exit(1)
 
 

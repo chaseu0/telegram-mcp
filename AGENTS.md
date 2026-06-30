@@ -13,7 +13,8 @@
 
 ## 默认行为（重要）
 
-1. **`TELEGRAM_MCP_SINGLETON=1`（默认）** — 仅一个 Telethon 守护进程；MCP 客户端为 stdio 桥接。并行 Agent **不要**关掉此选项。
+1. **`TELEGRAM_MCP_SINGLETON=1`（默认）** — 仅一个 Telethon 守护进程；MCP 客户端为 stdio 桥接。
+2. **多 Agent 并行** — 先 `uv run telegram-mcp-serve`，并在 `mcp.json` 设 **`TELEGRAM_MCP_AUTO_SPAWN=0`**，避免各会话争抢拉起守护进程。见 [docs/singleton-server.md](docs/singleton-server.md)。
 2. **优先 `TELEGRAM_SESSION_STRING`** — 避免文件 session 锁。
 3. **读 bot 消息用 `get_messages` / `list_messages`** — 含 `entities`、`links`，可解析 `tg://` 隐藏链接。
 4. **错误信息已结构化** — 工具返回含 `Type`、`Guidance`；详情见 `mcp_errors.log`。

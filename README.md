@@ -235,12 +235,21 @@ lsof -iTCP:18765 -sTCP:LISTEN
 Expect **one** line containing `--serve` (RSS ~30–50 MB) and zero or more bridges
 without `--serve` (RSS ~10–20 MB).
 
-**Manual daemon:**
+**Manual daemon (recommended for multiple agents):**
 
 ```bash
-uv run main.py --serve
-# equivalent: uv run telegram-mcp-serve
+uv run telegram-mcp-serve
+# equivalent: uv run main.py --serve
 ```
+
+Set in MCP client `env` so parallel agents **only bridge**, never each spawn a daemon:
+
+```json
+"TELEGRAM_MCP_AUTO_SPAWN": "0"
+```
+
+Health is determined by **port 18765 listening**, not the pid file alone. Stale pid
+files are reaped automatically when the process is gone.
 
 **Disable** (debug only — do not use with parallel agents on one session):
 

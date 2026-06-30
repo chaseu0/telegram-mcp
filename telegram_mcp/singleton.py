@@ -1,13 +1,20 @@
 """Single-instance Telegram MCP server coordination.
 
-When TELEGRAM_MCP_SINGLETON is enabled (default), stdio launches connect to one
-shared SSE server instead of each spawning their own Telethon session.
+Design principles:
+- **Port listening is the source of truth** for "daemon is up".
+- **PID file is advisory** and reaped when the process is dead.
+- **flock is released by the kernel** when a process exits; separate spawn vs daemon
+  lock files so a waiting bridge cannot block the daemon from starting.
+- MCP stdio clients **bridge only** by default; at most one spawner wins auto-start.
+  Set TELEGRAM_MCP_AUTO_SPAWN=0 to forbid auto-spawn (use telegram-mcp-serve / launchd).
 """
 
 from __future__ import annotations
 
+import atexit
 import fcntl
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -22,6 +29,15 @@ _STARTUP_TIMEOUT_SEC = float(os.getenv("TELEGRAM_MCP_STARTUP_TIMEOUT", "120"))
 
 def singleton_enabled() -> bool:
     return os.getenv("TELEGRAM_MCP_SINGLETON", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def auto_spawn_enabled() -> bool:
+    return os.getenv("TELEGRAM_MCP_AUTO_SPAWN", "1").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -49,16 +65,35 @@ def get_sse_url() -> str:
     return f"http://{get_host()}:{get_port()}/sse"
 
 
-def lock_path() -> Path:
-    return get_cache_dir() / f"singleton-{get_port()}.lock"
+def daemon_lock_path() -> Path:
+    return get_cache_dir() / f"daemon-{get_port()}.lock"
+
+
+def spawn_lock_path() -> Path:
+    return get_cache_dir() / f"spawn-{get_port()}.lock"
 
 
 def pid_path() -> Path:
-    return get_cache_dir() / f"singleton-{get_port()}.pid"
+    return get_cache_dir() / f"daemon-{get_port()}.pid"
 
 
 def serve_log_path() -> Path:
     return get_cache_dir() / f"serve-{get_port()}.log"
+
+
+# Backward-compatible name used in docs/tests
+def lock_path() -> Path:
+    return daemon_lock_path()
+
+
+def is_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def is_port_open(host: Optional[str] = None, port: Optional[int] = None) -> bool:
@@ -69,6 +104,50 @@ def is_port_open(host: Optional[str] = None, port: Optional[int] = None) -> bool
             return True
     except OSError:
         return False
+
+
+def is_daemon_healthy() -> bool:
+    """True when the SSE port accepts connections (authoritative)."""
+    return is_port_open()
+
+
+def read_daemon_pid() -> Optional[int]:
+    try:
+        return int(pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def remove_pid_file() -> None:
+    try:
+        pid_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def write_pid_file() -> None:
+    get_cache_dir().mkdir(parents=True, exist_ok=True)
+    pid_path().write_text(str(os.getpid()), encoding="utf-8")
+
+
+def reconcile_stale_state() -> None:
+    """Drop PID file when the recorded daemon process no longer exists."""
+    pid = read_daemon_pid()
+    if pid is not None and not is_process_alive(pid):
+        remove_pid_file()
+
+
+def daemon_status() -> dict:
+    """Inspectable snapshot for logging and diagnostics."""
+    pid = read_daemon_pid()
+    alive = pid is not None and is_process_alive(pid)
+    return {
+        "sse_url": get_sse_url(),
+        "port_open": is_port_open(),
+        "pid": pid,
+        "pid_alive": alive,
+        "auto_spawn": auto_spawn_enabled(),
+    }
 
 
 class FileLock:
@@ -110,16 +189,18 @@ class FileLock:
 def _wait_for_port(timeout_sec: float = _STARTUP_TIMEOUT_SEC) -> None:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
+        reconcile_stale_state()
         if is_port_open():
-            # Brief settle time so Telethon init in the daemon can finish.
-            time.sleep(0.4)
+            time.sleep(0.3)
             return
         time.sleep(0.2)
     log_hint = serve_log_path()
+    status = daemon_status()
     raise RuntimeError(
-        f"telegram-mcp singleton server did not become ready on "
-        f"{get_host()}:{get_port()} within {timeout_sec:.0f}s. "
-        f"Check {log_hint} and mcp_errors.log."
+        f"telegram-mcp daemon not ready at {get_host()}:{get_port()} within "
+        f"{timeout_sec:.0f}s (status={status}). "
+        f"Start once: `telegram-mcp-serve` or `uv run main.py --serve`. "
+        f"Log: {log_hint}"
     )
 
 
@@ -139,50 +220,79 @@ def _spawn_daemon() -> None:
     )
 
 
-def ensure_singleton_server_running(timeout_sec: float = _STARTUP_TIMEOUT_SEC) -> str:
-    """Start the shared SSE server if needed; return its SSE URL."""
-    url = get_sse_url()
-    if is_port_open():
-        return url
-
-    spawn_lock = FileLock(lock_path())
+def _try_spawn_daemon_once() -> bool:
+    """Return True if this process spawned the daemon subprocess."""
+    spawn_lock = FileLock(spawn_lock_path())
     try:
         spawn_lock.acquire(exclusive=True, nonblocking=True)
     except BlockingIOError:
-        _wait_for_port(timeout_sec)
-        return url
+        return False
 
     try:
+        reconcile_stale_state()
         if is_port_open():
-            return url
+            return False
         _spawn_daemon()
-        _wait_for_port(timeout_sec)
-        return url
+        return True
     finally:
+        # Release before waiting so the child can acquire daemon.lock.
         spawn_lock.release()
 
 
+def ensure_singleton_server_running(timeout_sec: float = _STARTUP_TIMEOUT_SEC) -> str:
+    """Return SSE URL; start daemon only if auto-spawn allowed and port is down."""
+    url = get_sse_url()
+    reconcile_stale_state()
+
+    if is_port_open():
+        return url
+
+    if not auto_spawn_enabled():
+        status = daemon_status()
+        raise RuntimeError(
+            f"No telegram-mcp daemon listening at {url} (status={status}). "
+            "Parallel MCP clients must not each start a daemon. "
+            "Start one shared instance: `telegram-mcp-serve` "
+            "(recommended: login item / launchd), then reload MCP clients."
+        )
+
+    spawned = _try_spawn_daemon_once()
+    if spawned:
+        print(
+            f"Spawned telegram-mcp daemon (log: {serve_log_path()})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Waiting for another client to finish starting the shared daemon...",
+            file=sys.stderr,
+        )
+
+    _wait_for_port(timeout_sec)
+    return url
+
+
 def acquire_daemon_lock(*, nonblocking: bool = False) -> FileLock:
-    """Lock held for the lifetime of the SSE daemon process."""
-    holder = FileLock(lock_path())
+    """Exclusive lock held for the lifetime of the SSE daemon process."""
+    holder = FileLock(daemon_lock_path())
     holder.acquire(exclusive=True, nonblocking=nonblocking)
     return holder
 
 
-def write_pid_file() -> None:
-    pid_path().parent.mkdir(parents=True, exist_ok=True)
-    pid_path().write_text(str(os.getpid()), encoding="utf-8")
+def register_daemon_shutdown_hooks() -> None:
+    """Ensure PID file is removed on normal exit or SIGTERM/SIGINT."""
 
+    def _cleanup() -> None:
+        remove_pid_file()
 
-def remove_pid_file() -> None:
-    try:
-        pid_path().unlink(missing_ok=True)
-    except OSError:
-        pass
+    atexit.register(_cleanup)
 
+    def _signal_handler(signum, _frame) -> None:
+        _cleanup()
+        raise SystemExit(128 + signum)
 
-def read_daemon_pid() -> Optional[int]:
-    try:
-        return int(pid_path().read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _signal_handler)
+        except (ValueError, OSError):
+            pass
