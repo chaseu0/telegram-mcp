@@ -8,11 +8,11 @@ except UnsafeInstallationError as exc:
     raise SystemExit(str(exc)) from None
 
 from telegram_mcp import runtime as _runtime
-from telegram_mcp.bridge import run_stdio_sse_bridge
+from telegram_mcp.bridge import bridge_idle_sec, run_stdio_sse_bridge
 from telegram_mcp.runtime import *
+from telegram_mcp import cleanup
 from telegram_mcp import session_log
 from telegram_mcp import singleton
-from telegram_mcp import session_log
 import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
 
 _RUNNER_FLAGS = frozenset({"--serve", "--stdio-direct"})
@@ -85,6 +85,7 @@ async def _main_stdio_direct() -> None:
 async def _serve_main() -> None:
     """Singleton daemon: one Telethon session + MCP over SSE."""
     singleton.reconcile_stale_state()
+    cleanup.reconcile_stale_bridges_on_startup()
 
     if singleton.is_port_open():
         pid = singleton.read_daemon_pid()
@@ -172,6 +173,7 @@ async def _main_singleton_stdio() -> None:
             "BRIDGE_START",
             sse_url=sse_url,
             daemon_status=status,
+            bridge_idle_sec=bridge_idle_sec(),
             **parent,
         )
         print(

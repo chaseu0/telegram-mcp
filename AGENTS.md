@@ -14,11 +14,12 @@
 ## 默认行为（重要）
 
 1. **`TELEGRAM_MCP_SINGLETON=1`（默认）** — 仅一个 Telethon 守护进程；MCP 客户端为 stdio 桥接。
-2. **多 Agent 并行** — 先 `uv run telegram-mcp-serve`，并在 `mcp.json` 设 **`TELEGRAM_MCP_AUTO_SPAWN=0`**，避免各会话争抢拉起守护进程。见 [docs/singleton-server.md](docs/singleton-server.md)。
-2. **优先 `TELEGRAM_SESSION_STRING`** — 避免文件 session 锁。
-3. **读 bot 消息用 `get_messages` / `list_messages`** — 含 `entities`、`links`，可解析 `tg://` 隐藏链接。
-4. **错误信息已结构化** — 工具返回含 `Type`、`Guidance`；RPC 详情见仓库内 `mcp_errors.log`；守护进程/桥接连接见 `~/.cache/telegram-mcp/logs/`（`daemon.log`、`clients.log`）。
-5. **写操作遇 `UserRestrictedError`** — 账号风控，联系 @SpamBot，勿重试建群/发消息。
+2. **多 Agent 并行** — 先 `uv run telegram-mcp-serve`（推荐 launchd 常驻），并在 `mcp.json` 设 **`TELEGRAM_MCP_AUTO_SPAWN=0`**。**禁止**在 MCP 客户端命令里加 `--serve`。
+3. **僵死桥接** — Cursor 关会话后 `main.py` 桥接可能残留。桥接默认空闲 30 分钟自退出；定期执行 `uv run telegram-mcp-cleanup`。详见 [docs/singleton-server.md](docs/singleton-server.md#僵死桥接进程stdio-客户端)。
+4. **优先 `TELEGRAM_SESSION_STRING`** — 避免文件 session 锁。
+5. **读 bot 消息用 `get_messages` / `list_messages`** — 含 `entities`、`links`，可解析 `tg://` 隐藏链接。
+6. **错误信息已结构化** — 工具返回含 `Type`、`Guidance`；RPC 详情见仓库内 `mcp_errors.log`；守护进程/桥接连接见 `~/.cache/telegram-mcp/logs/`（`daemon.log`、`clients.log`）。
+7. **写操作遇 `UserRestrictedError`** — 账号风控，联系 @SpamBot，勿重试建群/发消息。
 
 ## 任务 Skills
 
@@ -27,8 +28,12 @@
 ## 本地调用示例
 
 ```bash
-# 守护进程（可选，首次 MCP 连接会自动拉起）
-uv run main.py --serve
+# 守护进程（多 Agent 时必须先起；勿让每个 MCP 客户端 --serve）
+uv run telegram-mcp-serve
+
+# 清理僵死 stdio 桥接（不杀守护进程）
+uv run telegram-mcp-cleanup --dry-run
+uv run telegram-mcp-cleanup
 
 # 工具调用
 mcporter call telegram-mcp.get_me 2>/dev/null

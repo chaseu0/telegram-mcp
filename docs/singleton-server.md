@@ -42,6 +42,9 @@ Agent C ──► main.py (桥接) ──┘
 | `TELEGRAM_MCP_HOST` | `127.0.0.1` | 绑定地址 |
 | `TELEGRAM_MCP_CACHE_DIR` | `~/.cache/telegram-mcp` | 锁、pid、日志 |
 | `TELEGRAM_MCP_STARTUP_TIMEOUT` | `120` | 等待端口就绪秒数 |
+| `TELEGRAM_MCP_BRIDGE_IDLE_SEC` | `1800` | 桥接无 stdio 流量超过此秒数则**自行退出**（`0` = 禁用） |
+| `TELEGRAM_MCP_BRIDGE_MAX_AGE_SEC` | `7200` | `telegram-mcp-cleanup` 清理运行超过此秒数的桥接（`0` = 禁用） |
+| `TELEGRAM_MCP_BRIDGE_PARENT_CHECK_SEC` | `5` | 桥接检测父进程是否存活的间隔秒数 |
 
 ### 多 Agent 推荐配置
 
@@ -88,6 +91,78 @@ uv run telegram-mcp-serve
 
 旧版 `serve-*.log`、`singleton-*.pid` / `singleton-*.lock` 在守护进程新会话启动时自动清理。
 
+## 僵死桥接进程（stdio 客户端）
+
+Cursor / mcporter 关闭会话后，**桥接** `main.py` 可能不会被回收，在后台堆积（`ps` 可见大量 `uv run main.py` / `python main.py`，**无** `--serve`）。这些进程**不持有** Telethon，但占内存与进程表。
+
+### 桥接自管理（内置）
+
+每个桥接进程会：
+
+1. **父进程退出**（`ppid=1` 或父进程已死）→ 自动退出  
+2. **stdio 无流量**超过 `TELEGRAM_MCP_BRIDGE_IDLE_SEC`（默认 30 分钟）→ 自动退出  
+3. stdin 关闭时随 MCP stdio 会话正常结束  
+
+活动心跳文件：`{cache}/bridges/{pid}.heartbeat`（供外部清理判断空闲）。
+
+### 手动 / 定期清理
+
+```bash
+# 预览将终止的僵死桥接（不杀守护进程）
+uv run telegram-mcp-cleanup --dry-run
+
+# 终止：父进程已死 / 孤儿 ppid=1 / 超龄 / 心跳空闲过久
+uv run telegram-mcp-cleanup
+```
+
+守护进程 `--serve` 启动时也会 **best-effort** 执行一次同样清理（见 `logs/daemon.log` 的 `BRIDGE_RECONCILE`）。
+
+**禁止**对 MCP 客户端配置 `--serve`；只应有一个 `telegram-mcp-serve`。
+
+#### launchd 定期清理（示例）
+
+`~/Library/LaunchAgents/com.telegram-mcp.cleanup.plist`：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.telegram-mcp.cleanup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/telegram-mcp/.venv/bin/telegram-mcp-cleanup</string>
+  </array>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>StandardErrorPath</key><string>/tmp/telegram-mcp-cleanup.err</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.telegram-mcp.cleanup.plist
+```
+
+#### cron（示例，每 30 分钟）
+
+```cron
+*/30 * * * * /path/to/telegram-mcp/.venv/bin/telegram-mcp-cleanup >/dev/null 2>&1
+```
+
+### 推荐：守护进程用 launchd，客户端只桥接
+
+```xml
+<!-- ~/Library/LaunchAgents/com.telegram-mcp.serve.plist 片段 -->
+<key>ProgramArguments</key>
+<array>
+  <string>/path/to/telegram-mcp/.venv/bin/telegram-mcp-serve</string>
+</array>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+```
+
+MCP `mcp.json` 使用 `TELEGRAM_MCP_AUTO_SPAWN=0`，**不要**在客户端命令里加 `--serve`。
+
 ## 验证
 
 ```bash
@@ -104,6 +179,11 @@ kill -0 $(cat ~/.cache/telegram-mcp/daemon-18765.pid) && echo alive
 ## 清理与重启
 
 ```bash
+# 优先：只清理僵死桥接（保留 --serve 守护进程）
+uv run telegram-mcp-cleanup --dry-run
+uv run telegram-mcp-cleanup
+
+# 全量重启（含守护进程）
 pkill -f 'telegram-mcp.*main.py' || true
 rm -f ~/.cache/telegram-mcp/daemon-18765.pid   # 可选；reconcile 也会清僵死 pid
 
@@ -121,3 +201,4 @@ Cursor：**Reload MCP**。
 | `daemon not ready` 120s | 旧版锁死锁 / 守护启动失败 | 更新到最新代码；看 `logs/daemon.log`、`logs/spawn.log` |
 | 多个 `--serve` | 旧代码或 AUTO_SPAWN 竞态 | 只保留一个；多 Agent 用 `AUTO_SPAWN=0` |
 | `No daemon listening` + AUTO_SPAWN=0 | 未先起 serve | `uv run telegram-mcp-serve` |
+| 大量 `main.py` 无 `--serve` | Cursor 未回收桥接 | `telegram-mcp-cleanup`；设 `TELEGRAM_MCP_BRIDGE_IDLE_SEC`；见上文 launchd/cron |
