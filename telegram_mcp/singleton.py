@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from telegram_mcp import session_log
+
 DEFAULT_PORT = 18765
 DEFAULT_HOST = "127.0.0.1"
 _STARTUP_TIMEOUT_SEC = float(os.getenv("TELEGRAM_MCP_STARTUP_TIMEOUT", "120"))
@@ -78,7 +80,8 @@ def pid_path() -> Path:
 
 
 def serve_log_path() -> Path:
-    return get_cache_dir() / f"serve-{get_port()}.log"
+    """Deprecated; structured logs live under ``logs/daemon.log``."""
+    return session_log.daemon_log_path()
 
 
 # Backward-compatible name used in docs/tests
@@ -194,29 +197,38 @@ def _wait_for_port(timeout_sec: float = _STARTUP_TIMEOUT_SEC) -> None:
             time.sleep(0.3)
             return
         time.sleep(0.2)
-    log_hint = serve_log_path()
     status = daemon_status()
+    session_log.log_spawn(
+        "WAIT_TIMEOUT",
+        host=get_host(),
+        port=get_port(),
+        timeout_sec=timeout_sec,
+        status=status,
+    )
     raise RuntimeError(
         f"telegram-mcp daemon not ready at {get_host()}:{get_port()} within "
         f"{timeout_sec:.0f}s (status={status}). "
         f"Start once: `telegram-mcp-serve` or `uv run main.py --serve`. "
-        f"Log: {log_hint}"
+        f"Logs: {session_log.daemon_log_path()}, {session_log.spawn_log_path()}"
     )
 
 
 def _spawn_daemon() -> None:
-    log_path = serve_log_path()
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_file = open(log_path, "a", encoding="utf-8")
     cmd = [sys.executable, "-m", "telegram_mcp.runner", "--serve"]
-    subprocess.Popen(
+    proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
-        stdout=log_file,
-        stderr=log_file,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         start_new_session=True,
         close_fds=True,
         env=os.environ.copy(),
+    )
+    session_log.log_spawn(
+        "SPAWN_DAEMON",
+        child_pid=proc.pid,
+        cmd=" ".join(cmd),
+        daemon_log=session_log.daemon_log_path(),
     )
 
 
@@ -226,12 +238,15 @@ def _try_spawn_daemon_once() -> bool:
     try:
         spawn_lock.acquire(exclusive=True, nonblocking=True)
     except BlockingIOError:
+        session_log.log_spawn("SPAWN_DEFERRED", reason="another_spawner_holds_lock")
         return False
 
     try:
         reconcile_stale_state()
         if is_port_open():
+            session_log.log_spawn("SPAWN_SKIPPED", reason="port_already_open")
             return False
+        session_log.log_spawn("SPAWN_ATTEMPT", spawn_lock=str(spawn_lock_path()))
         _spawn_daemon()
         return True
     finally:
@@ -245,6 +260,7 @@ def ensure_singleton_server_running(timeout_sec: float = _STARTUP_TIMEOUT_SEC) -
     reconcile_stale_state()
 
     if is_port_open():
+        session_log.log_spawn("CONNECT_EXISTING", sse_url=url, port_open=True)
         return url
 
     if not auto_spawn_enabled():
@@ -258,17 +274,29 @@ def ensure_singleton_server_running(timeout_sec: float = _STARTUP_TIMEOUT_SEC) -
 
     spawned = _try_spawn_daemon_once()
     if spawned:
+        session_log.log_spawn(
+            "WAIT_FOR_PORT",
+            wait_role="spawner",
+            timeout_sec=timeout_sec,
+            daemon_log=session_log.daemon_log_path(),
+        )
         print(
-            f"Spawned telegram-mcp daemon (log: {serve_log_path()})",
+            f"Spawned telegram-mcp daemon (log: {session_log.daemon_log_path()})",
             file=sys.stderr,
         )
     else:
+        session_log.log_spawn(
+            "WAIT_FOR_PORT",
+            wait_role="waiter",
+            timeout_sec=timeout_sec,
+        )
         print(
             "Waiting for another client to finish starting the shared daemon...",
             file=sys.stderr,
         )
 
     _wait_for_port(timeout_sec)
+    session_log.log_spawn("PORT_READY", sse_url=url)
     return url
 
 

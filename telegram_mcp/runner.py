@@ -10,7 +10,9 @@ except UnsafeInstallationError as exc:
 from telegram_mcp import runtime as _runtime
 from telegram_mcp.bridge import run_stdio_sse_bridge
 from telegram_mcp.runtime import *
+from telegram_mcp import session_log
 from telegram_mcp import singleton
+from telegram_mcp import session_log
 import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
 
 _RUNNER_FLAGS = frozenset({"--serve", "--stdio-direct"})
@@ -86,6 +88,12 @@ async def _serve_main() -> None:
 
     if singleton.is_port_open():
         pid = singleton.read_daemon_pid()
+        session_log.log_daemon(
+            "DUPLICATE_SERVE_ATTEMPT",
+            sse_url=singleton.get_sse_url(),
+            existing_pid=pid,
+            port_open=True,
+        )
         print(
             f"telegram-mcp daemon already listening on {singleton.get_sse_url()} "
             f"(pid {pid or 'unknown'})",
@@ -97,7 +105,11 @@ async def _serve_main() -> None:
     try:
         daemon_lock = singleton.acquire_daemon_lock(nonblocking=True)
     except BlockingIOError:
-        # Another process is starting or running the daemon; wait for the port.
+        session_log.log_daemon(
+            "DUPLICATE_SERVE_ATTEMPT",
+            reason="daemon_lock_held",
+            sse_url=singleton.get_sse_url(),
+        )
         print(
             "Daemon lock held by another process; waiting for SSE port...",
             file=sys.stderr,
@@ -105,22 +117,39 @@ async def _serve_main() -> None:
         try:
             singleton._wait_for_port()
         except RuntimeError as exc:
+            session_log.log_daemon("STARTUP_FAILED", error=str(exc))
             print(str(exc), file=sys.stderr)
             sys.exit(1)
         return
 
+    session_log.begin_daemon_session(
+        port=singleton.get_port(),
+        sse_url=singleton.get_sse_url(),
+        host=singleton.get_host(),
+    )
+    session_log.archive_large_mcp_errors_log()
+    session_log.log_daemon("DAEMON_START", auto_spawn=singleton.auto_spawn_enabled())
     singleton.register_daemon_shutdown_hooks()
     try:
+        session_log.log_daemon("TELETHON_BOOTSTRAP_BEGIN", clients=list(clients.keys()))
         await _bootstrap_telegram_clients()
+        session_log.log_daemon("TELETHON_BOOTSTRAP_OK", clients=list(clients.keys()))
         singleton.write_pid_file()
+        session_log.log_daemon(
+            "SSE_LISTENING",
+            sse_url=singleton.get_sse_url(),
+            pid_file=str(singleton.pid_path()),
+        )
         print(
             f"telegram-mcp daemon SSE at {singleton.get_sse_url()} (pid {os.getpid()})",
             file=sys.stderr,
         )
         await mcp.run_sse_async()
     except Exception as exc:
+        session_log.log_daemon("STARTUP_FAILED", error=str(exc))
         _handle_startup_error(exc)
     finally:
+        session_log.log_daemon("DAEMON_SHUTDOWN")
         singleton.remove_pid_file()
         if daemon_lock is not None:
             daemon_lock.release()
@@ -129,18 +158,34 @@ async def _serve_main() -> None:
 
 async def _main_singleton_stdio() -> None:
     """Connect stdio to the shared singleton SSE server (no local Telethon)."""
+    parent = session_log.get_parent_process_info()
+    session_log.log_client(
+        "CLIENT_CONNECT",
+        auto_spawn=singleton.auto_spawn_enabled(),
+        **parent,
+    )
     try:
         singleton.reconcile_stale_state()
         sse_url = singleton.ensure_singleton_server_running()
         status = singleton.daemon_status()
+        session_log.log_client(
+            "BRIDGE_START",
+            sse_url=sse_url,
+            daemon_status=status,
+            **parent,
+        )
         print(
             f"Bridging stdio to shared daemon at {sse_url} (status={status})",
             file=sys.stderr,
         )
         await run_stdio_sse_bridge(sse_url)
+        session_log.log_client("BRIDGE_END", sse_url=sse_url, reason="normal", **parent)
     except Exception as exc:
+        session_log.log_client("BRIDGE_END", reason="error", error=str(exc), **parent)
         print(f"Error connecting to shared daemon: {exc}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        session_log.log_client("CLIENT_DISCONNECT", **parent)
 
 
 def _split_runner_argv(argv: list[str]) -> tuple[bool, bool, list[str]]:

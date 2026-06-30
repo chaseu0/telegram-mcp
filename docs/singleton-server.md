@@ -72,13 +72,21 @@ uv run telegram-mcp-serve
 
 ## 运行时文件（端口 18765）
 
+日志目录：`~/.cache/telegram-mcp/logs/`（或 `$TELEGRAM_MCP_CACHE_DIR/logs/`）
+
 | 路径 | 说明 |
 |------|------|
 | `daemon-18765.pid` | 守护进程 PID（进程死后会被 reconcile 清掉） |
 | `daemon-18765.lock` | 守护进程 flock |
 | `spawn-18765.lock` | 短暂 spawn 协调 |
-| `serve-18765.log` | 守护进程日志 |
-| 仓库内 `mcp_errors.log` | MCP 工具 RPC 错误 |
+| `logs/daemon.log` | 守护进程生命周期（每次 `--serve` 新会话会截断重写） |
+| `logs/clients.log` | stdio 桥接连接/断开（同一会话内追加） |
+| `logs/spawn.log` | 自动拉起 / 等待端口协调 |
+| 仓库内 `mcp_errors.log` | **仅** MCP 工具 RPC 错误（不含连接事件） |
+
+每行格式：`ISO时间 [DAEMON|CLIENT|SPAWN] pid=… 事件 key=value …`
+
+旧版 `serve-*.log`、`singleton-*.pid` / `singleton-*.lock` 在守护进程新会话启动时自动清理。
 
 ## 验证
 
@@ -110,6 +118,6 @@ Cursor：**Reload MCP**。
 | 现象 | 原因 | 处理 |
 |------|------|------|
 | pid 存在但进程不在 | 守护进程被 kill -9 | 已自动 reconcile；或手动删 pid 后重启 serve |
-| `daemon not ready` 120s | 旧版锁死锁 / 守护启动失败 | 更新到最新代码；看 `serve-*.log` |
+| `daemon not ready` 120s | 旧版锁死锁 / 守护启动失败 | 更新到最新代码；看 `logs/daemon.log`、`logs/spawn.log` |
 | 多个 `--serve` | 旧代码或 AUTO_SPAWN 竞态 | 只保留一个；多 Agent 用 `AUTO_SPAWN=0` |
 | `No daemon listening` + AUTO_SPAWN=0 | 未先起 serve | `uv run telegram-mcp-serve` |

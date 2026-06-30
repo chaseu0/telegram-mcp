@@ -29,6 +29,7 @@ def test_get_sse_url_and_paths(monkeypatch, tmp_path):
     assert singleton.daemon_lock_path() == tmp_path / "daemon-19999.lock"
     assert singleton.spawn_lock_path() == tmp_path / "spawn-19999.lock"
     assert singleton.pid_path() == tmp_path / "daemon-19999.pid"
+    assert singleton.serve_log_path() == tmp_path / "logs" / "daemon.log"
 
 
 def test_is_port_open_false():
@@ -76,6 +77,7 @@ def test_ensure_singleton_no_auto_spawn_raises(monkeypatch, tmp_path):
 def test_try_spawn_only_one_wins(monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_MCP_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("TELEGRAM_MCP_PORT", "20002")
+    monkeypatch.setenv("TELEGRAM_MCP_AUTO_SPAWN", "1")
     calls = {"spawn": 0}
 
     def fake_spawn():
